@@ -439,21 +439,43 @@ convertDependentDecls pragmas (HskDependentDecls [d]) = do
   d <- convertDecl pragmas d
   return d
 convertDependentDecls pragmas (HskDependentDecls decls@(decl:_))
-  | isFunBind decl = assert (all isFunBind decls)
-      $ do funcmds <- mapsM (convertDecl pragmas) decls
+  | isFunBind decl = 
+        do funcmds <- mapsM (convertDecl pragmas) decls
            let (kinds, sigs, eqs) = unzip3 (map splitFunCmd funcmds)
            let kind = if any (== Isa.Function_Sorry) kinds then Isa.Function_Sorry else Isa.Fun
            return [Isa.Function (Isa.Function_Stmt kind sigs (flat eqs))]
-  | isDataDecl decl = assert (all isDataDecl decls)
-      $ do dataDefs <- mapM (convertDataDecl pragmas) decls
-           auxCmds <- mapM (generateRecordAux pragmas) decls
-           return (Isa.Datatype dataDefs : concat auxCmds)
+  | otherwise = 
+        let (decls', tydecls) = partition isDataDecl decls
+            tydecls' = map (\(Hsx.TypeDecl loc (Hsx.Ident i) l_param e) -> (i, Hsx.TypeDecl loc (Hsx.Ident i) l_param e)) tydecls
+            decls'' = map (\(Hsx.DataDecl p1 p2 p3 p4 l_param l p) -> 
+                          Hsx.DataDecl p1 p2 p3 p4 l_param (map (\(Hsx.QualConDecl loc p1 p2 (Hsx.ConDecl n l)) -> Hsx.QualConDecl loc p1 p2 (Hsx.ConDecl n (map (\(Hsx.UnBangedTy t) -> Hsx.UnBangedTy (replaceTy tydecls' t)) l))) l) p) decls' in
+        do 
+           dataDefs <- mapM (convertDataDecl pragmas) decls''
+           auxCmds <- mapM (generateRecordAux pragmas) decls''
+           tyDefs <- mapM (\x -> convertDependentDecls pragmas $ HskDependentDecls [x]) tydecls
+           return (Isa.Datatype dataDefs : concat (auxCmds ++ tyDefs))
   where 
     isFunBind (Hsx.FunBind _) = True
     isFunBind _ = False
     isDataDecl (Hsx.DataDecl _ _ _ _ _ _ _) = True
     isDataDecl _ = False
     splitFunCmd (Isa.Function (Isa.Function_Stmt kind [sig] eqs)) = (kind, sig, eqs)
+    replaceTy tydecls t = aux t where
+      aux t = case t of
+        Hsx.TyApp (Hsx.TyCon (Hsx.UnQual (Hsx.Ident n))) (Hsx.TyVar (Hsx.Ident p)) -> 
+          case AList.lookup tydecls n of Just (Hsx.TypeDecl _ _ l_param e) | l_param == [Hsx.Ident p] -> e -- if l_param == [Hsx.Ident p] then e else fail "Not yet implemented."
+                                         _ -> t
+
+        Hsx.TyForall m c t -> Hsx.TyForall m c (aux t)
+        Hsx.TyFun t1 t2 -> Hsx.TyFun (aux t1) (aux t2)
+        Hsx.TyTuple b l -> Hsx.TyTuple b (map (aux) l)
+        Hsx.TyApp t1 t2 -> Hsx.TyApp (aux t1) (aux t2)
+        Hsx.TyVar v -> Hsx.TyVar v
+        Hsx.TyCon c -> Hsx.TyCon c
+        Hsx.TyPred q -> Hsx.TyPred q
+        Hsx.TyInfix t1 q t2 -> Hsx.TyInfix (aux t1) q (aux t2)
+        Hsx.TyKind t k -> Hsx.TyKind (aux t) k
+
 
 instance Convert Hsx.Module Isa.Stmt where
     convert' pragmas (Hsx.Module loc modul _ _ _exports _imports decls)
